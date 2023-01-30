@@ -3,7 +3,6 @@ import os
 import re
 
 import click
-from tqdm import tqdm
 import xlrd
 
 
@@ -16,7 +15,7 @@ def get_xls_book(xls_file_name: str) -> xlrd.book.Book:
 
 def get_wz_sheet_list(xls_book: xlrd.book.Book) -> list:
     wz_list = xls_book.sheet_names()
-    return [item for item in wz_list if re.fullmatch(r"\d\d\d_\d\d_22_6", item) is not None]
+    return [item for item in wz_list if re.fullmatch(r"[0-9]{1,3}_[0-9]{1,2}_[0-9]{1,2}_6", item) is not None]
 
 
 def get_wz_sheet(xls_book: xlrd.book.Book, sheet_name: str) -> xlrd.sheet.Sheet:
@@ -24,48 +23,46 @@ def get_wz_sheet(xls_book: xlrd.book.Book, sheet_name: str) -> xlrd.sheet.Sheet:
 
 
 def get_wz_number(row_items: list) -> str:
-    if re.fullmatch(r"\d\d\d/[0-1][0-9]/2[0-9]/6", row_items[-2]) is not None:
+    if re.fullmatch(r"\d\d\d/[0-1][0-9]/[0-9]{1,2}/6", row_items[-2]) is not None:
         return row_items[-2]
     else:
         return ""
 
 
-def compose_wz_item(assortment_dict: dict, item_name: str, item_count: int) -> dict:
-    wz_item = {}
-    wz_item["index"] = int(assortment_dict.get(item_name, 0))
-    wz_item["name"] = item_name
-    wz_item["quantity"] = item_count
-    return wz_item
+def get_first_row(column: list) -> int:
+    i=0
+    while column[i]!="Lp":
+        i += 1
+    return i+1
 
 
-def get_module_by_wz(wz_sheet: xlrd.sheet.Sheet, module_name: str, wz_type: str="SPRZEDAŻ", start_row=6, start_col=4, end_col=16) -> dict:
-    result = {}
-    if re.search(wz_type, wz_sheet.cell_value(15,14)) is None:
+def check_wz_type(wz_type: str, tested_string: str) -> bool:
+    return re.search(wz_type, tested_string, re.IGNORECASE + re.MULTILINE) is None
+
+
+def get_module_by_wz(wz_sheet: xlrd.sheet.Sheet, module_name: str, wz_type: str="SPRZEDAŻ", start_row=6, start_col=4, end_col=16) -> list[dict]:
+    result = []
+    module_item = {}
+    if check_wz_type(wz_type, wz_sheet.cell_value(15,14)):
         return result
-    if wz_sheet.cell_value(0,0) == "WZv1":
-        sr = start_row + 13
-    else:
-        sr = start_row + 15    
+    sr = get_first_row(wz_sheet.col_values(start_col))
     row = wz_sheet.row_values(sr,start_col, end_col)
     while type(row[0]) == float:
-        if re.search(module_name, row[1]) is not None:
-            result["module_name"] = row[1]
-            result["quantity"] = int(row[-1])
+        if re.search(module_name, row[1], re.IGNORECASE + re.MULTILINE) is not None:
+            module_item["module_name"] = row[1]
+            try:
+                module_item["quantity"] = int(row[-1])
+            except ValueError:
+                module_item["quantity"] = int(0)
             number_list = [item.split('.')[0].strip() for item in str(row[7]).split(',')]
-            result["module_numbers"] = number_list
-            # for n_str in number_list:
-            #     try:
-            #          n = int(float(n_str))       
-            #     except ValueError:
-            #         n = '-'
-            #     result["module_numbers"].append(n)
+            module_item["module_numbers"] = number_list
             row = wz_sheet.row_values(start_row, start_col, end_col)
-            result["wz_number"] = get_wz_number(row)
+            module_item["wz_number"] = get_wz_number(row)
             row = wz_sheet.row_values(start_row+3, start_col, end_col)
-            result["disposition_number"] = str(row[-3] + " " + row[-2])
-            result["type"] = wz_sheet.cell_value(15,14)
-            break
-        sr +=1
+            module_item["disposition_number"] = str(row[-3] + " " + row[-2])
+            module_item["type"] = wz_sheet.cell_value(15,14)
+            result.append(module_item.copy())
+        sr += 1
         row = wz_sheet.row_values(sr,start_col, end_col)
     return result
 
@@ -75,42 +72,38 @@ def get_module_by_wz(wz_sheet: xlrd.sheet.Sheet, module_name: str, wz_type: str=
 @click.argument("module-name", nargs=1)
 @click.argument("wz-type", nargs=1)
 def main(module_name: str, wz_type: str, wz_file: str):
+    """
+    Program generuje listę modułów z pliku [wz_file] (plik wz'tów *.xls) o określonej nazwie [module_name] z określoengo typu wz'tów [wz_type].
+    Lista elementów zapisywana jest do pliku csv w bieżącym katalogu.
+    v1.0.0
+    """
     wz_book = get_xls_book(os.path.join(WZ_XLS_FOLDER, wz_file))
     wz_list = get_wz_sheet_list(wz_book)
     mod_list = []
     for wz_name in wz_list:
         wz_sheet = get_wz_sheet(wz_book, wz_name)
-        mod = get_module_by_wz(wz_sheet,module_name,wz_type)
-        if len(mod) > 0:
-            mod_list.append(mod)
-    print("NAZWA MODUŁU                 NR WZ     NR DYSPOZYCJI     TYP     ILOŚĆ    NUMERY")
-    print("========================= =========== =============== ========= ======= =============")
+        mod_items = get_module_by_wz(wz_sheet,module_name,wz_type)
+        if len(mod_items) > 0:
+            mod_list.extend(mod_items)
+
+    modules_sum = sum([int(q["quantity"]) for q in mod_list])
+    items_sum = len(mod_list)
+    print("NAZWA MODUŁU                           NR WZ     NR DYSPOZYCJI     TYP     ILOŚĆ    NUMERY")
+    print("=================================== =========== =============== ========= ======= =============")
     for m in mod_list:
-        print(f"{m['module_name'][:25]:25} {m['wz_number']:11} {m['disposition_number']:15} {m['type'][:9]:9} {m['quantity']:7} \
+        print(f"{m['module_name'][:35]:35} {m['wz_number']:11} {m['disposition_number']:15} {m['type'][:9]:9} {m['quantity']:7} \
             {m['module_numbers']}")
-    fieldnames = mod_list[0].keys()
-    csv_filename = os.path.join(".", module_name+"_"+wz_type+".csv")
-    with open(csv_filename, "w", encoding="UTF8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(mod_list)
-    
-    
-    
-    # assortment_dict = get_assortment(assortment_book)
-    # print("done.")
-    # print("Reading DWS list...", end="")
-    # dws_book = get_xls_book(os.path.join(DWS_XLS_FOLDER, "DWSygn v1 2022.xls"))
-    # dws_list = get_dws_sheet_list(dws_book)
-    # print("done.")
-    # t = tqdm(total=len(dws_list), unit=" DWS", desc="Extracting WZ")
-    # for dws_name in dws_list:
-    #     dws_sheet = get_dws_sheet(dws_book, dws_name)
-    #     wz_list = [get_wz_content(assortment_dict, dws_sheet, start_row=sr) for sr in get_wz_start(dws_sheet)]
-    #     for wz in wz_list:
-    #         save_json(wz, get_json_file_name(WZ_JSON_FOLDER,"WZ_"+wz["WZ_number"]))
-    #     t.update(n=1)
-    # t.close()
+    print(f"RAZEM POZYCJI: {items_sum}, RAZEM MODUŁÓW: {modules_sum}")
+    try:
+        fieldnames = mod_list[0].keys()
+    except IndexError:
+        print("Nie znaleziono modułów pasujących do wzorca.")
+    else:
+        csv_filename = os.path.join(".", module_name+"_"+wz_type+".csv")
+        with open(csv_filename, "w", encoding="UTF8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(mod_list)
 
 
 if __name__ == "__main__":
